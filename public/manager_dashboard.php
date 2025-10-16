@@ -1,4 +1,5 @@
 <?php
+
 // public/manager_dashboard.php
 require_once __DIR__ . '/../includes/db.php';
 require_once __DIR__ . '/../includes/auth.php';
@@ -23,8 +24,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'add_j
             $ins->execute([$title, $desc]);
             $jobId = $pdo->lastInsertId();
 
-            // skills posted as comma-separated string of names from the form; we'll handle both
-            // For simplicity we accept a set of skill names in a single input "skill_list" split by comma
             if (!empty($_POST['skill_list'])) {
                 $skillList = array_map('trim', explode(',', $_POST['skill_list']));
                 foreach ($skillList as $idx => $skillName) {
@@ -38,7 +37,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'add_j
                         $skillId = $pdo->lastInsertId();
                     } else $skillId = $s['id'];
 
-                    // required level from optional levels array or default 3
                     $required_level = intval($levels[$idx] ?? 3);
                     $pdo->prepare("INSERT INTO job_skills (job_id, skill_id, required_level) VALUES (?, ?, ?)")
                         ->execute([$jobId, $skillId, $required_level]);
@@ -54,15 +52,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'add_j
     }
 }
 
-// Assignment action handled by assign.php (below) via POST
-
 // Fetch jobs
 $jobs = $pdo->query("SELECT * FROM jobs ORDER BY created_at DESC")->fetchAll();
 
 // Fetch recent workers (for reference)
 $workers = $pdo->query("SELECT id,name FROM workers ORDER BY name LIMIT 200")->fetchAll();
-?>
 
+// ---------- Notifications: fetch recent notifications for this manager ----------
+$mgr_id = intval($_SESSION['manager_id']);
+$notifStmt = $pdo->prepare("
+    SELECT n.*, w.name as worker_name, a.job_id, j.title as job_title
+    FROM notifications n
+    LEFT JOIN workers w ON w.id = n.worker_id
+    LEFT JOIN assignments a ON a.id = n.assignment_id
+    LEFT JOIN jobs j ON j.id = a.job_id
+    WHERE n.manager_id = ?
+    ORDER BY n.is_read ASC, n.created_at DESC
+    LIMIT 50
+");
+$notifStmt->execute([$mgr_id]);
+$notifications = $notifStmt->fetchAll(PDO::FETCH_ASSOC);
+?>
 <div class="row">
   <div class="col-md-8">
     <h4>Manager Dashboard — <?= esc($_SESSION['manager_name']) ?></h4>
@@ -131,11 +141,41 @@ $workers = $pdo->query("SELECT id,name FROM workers ORDER BY name LIMIT 200")->f
   </div>
 
   <div class="col-md-4">
+    <!-- Notifications card -->
+    <div class="card mb-3">
+      <div class="card-body">
+        <h5>Notifications</h5>
+        <?php if (count($notifications) === 0): ?>
+          <div class="small text-muted">No notifications</div>
+        <?php else: ?>
+          <ul class="list-group">
+            <?php foreach ($notifications as $n): ?>
+              <li class="list-group-item d-flex justify-content-between align-items-start <?= $n['is_read'] ? '' : 'bg-light' ?>">
+                <div>
+                  <div><strong><?= esc($n['message']) ?></strong></div>
+                  <div class="small text-muted">
+                    From: <?= esc($n['worker_name']) ?> • <?= esc($n['created_at']) ?>
+                    <?php if (!empty($n['job_title'])): ?> • Job: <?= esc($n['job_title']) ?><?php endif; ?>
+                  </div>
+                </div>
+                <div>
+                  <?php if (!$n['is_read']): ?>
+                    <button class="btn btn-sm btn-primary mark-read-btn" data-id="<?= (int)$n['id'] ?>">Mark read</button>
+                  <?php else: ?>
+                    <span class="small text-muted">Read</span>
+                  <?php endif; ?>
+                </div>
+              </li>
+            <?php endforeach; ?>
+          </ul>
+        <?php endif; ?>
+      </div>
+    </div>
+
     <?php
     // If job param present, show recommended workers
     if (!empty($_GET['job'])):
       $jobId = intval($_GET['job']);
-      // Query to compute matched points as in plan; also handle jobs with no skills (will show none)
       $sql = "
       SELECT w.id, w.name,
         COALESCE(SUM(LEAST(ws.proficiency, js.required_level)),0) AS matched_points,
@@ -191,7 +231,37 @@ $workers = $pdo->query("SELECT id,name FROM workers ORDER BY name LIMIT 200")->f
         </div>
       </div>
     <?php endif; ?>
+
   </div>
 </div>
 
+<script>
+document.addEventListener('click', async function(e){
+  if (!e.target.classList.contains('mark-read-btn')) return;
+  const btn = e.target;
+  const id = btn.dataset.id;
+  btn.disabled = true;
+  try {
+    const res = await fetch('mark_notification_read.php', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ id: parseInt(id,10) })
+    });
+    const data = await res.json();
+    if (data.success) {
+      // simplest: reload the page to update list
+      location.reload();
+    } else {
+      alert(data.msg || 'Failed');
+      btn.disabled = false;
+    }
+  } catch (err) {
+    alert('Network error');
+    btn.disabled = false;
+  }
+});
+</script>
+
 <?php require_once __DIR__ . '/../includes/footer.php'; ?>
+
